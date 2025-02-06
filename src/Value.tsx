@@ -2,10 +2,11 @@ import React from 'react';
 import { useStore } from './Store.tsx';
 
 function Value({ data }: { data: "first" | "last" }) {
-  const [fieldValue] = useStore((store) => store[data]);
+  const [store] = useStore();
+
   return (
     <div className="value">
-      {data}: {fieldValue}
+      {data}: {store[data]}
     </div>
   );
 }

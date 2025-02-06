@@ -1,44 +1,104 @@
-import React, { useRef, useCallback, createContext, useContext, useSyncExternalStore, type ReactNode } from 'react';
+import React, { useRef, useCallback, createContext, useContext, useSyncExternalStore, useMemo, type ReactNode, type Reducer } from 'react';
 
-type Store = { first: string; last: string };
+type InitialState = {
+  first: string;
+  last: string;
+};
 
-function useStoreData(): {
-  get: () => Store;
-  set: (value: Partial<Store>) => void;
+const INITIAL_STATE: InitialState = {
+  first: "",
+  last: "",
+};
+
+type Action = {
+  type: string;
+  payload?: any;
+};
+
+interface Store<State> {
+  get: () => State;
+  set: (action: Action) => void;
   subscribe: (callback: () => void) => () => void;
-} {
-  const store = useRef({
-    first: '',
-    last: '',
-  });
-
-  const get = useCallback(() => store.current, []);
-
-  const subscribers = useRef(new Set<() => void>());
-
-  const set = useCallback((value: Partial<Store>) => {
-    store.current = { ...store.current, ...value };
-    subscribers.current.forEach((callback) => callback());
-  }, []);
-
-  const subscribe = useCallback((callback: () => void) => {
-    subscribers.current.add(callback);
-    return () => subscribers.current.delete(callback);
-  }, []);
-
-  return {
-    get,
-    set,
-    subscribe,
-  };
 }
 
-type UseStoreDataReturnType = ReturnType<typeof useStoreData>;
+// Utility to detect execution environment
+function canUseDOM(): boolean {
+  return typeof window !== 'undefined' && typeof window.requestAnimationFrame !== 'undefined';
+}
 
-const StoreContext = createContext<UseStoreDataReturnType | null>(null);
+function useConfiguredStore<State>(initialState: State, reducer: Reducer<State, Action>): Store<State> {
+  const storeRef = useRef(initialState);
+  const subscribersRef = useRef(new Set<() => void>());
+  const reducerRef = useRef(reducer);
+  const pendingUpdatesRef = useRef<(() => void)[]>([]);
+
+  // Update reducer ref when config changes
+  reducerRef.current = reducer;
+
+  const get = useCallback(() => storeRef.current, []);
+
+  // SSR-safe batch updates implementation
+  const batchUpdates = useCallback((updates: (() => void)[]) => {
+    if (canUseDOM()) {
+      // Browser environment: use requestAnimationFrame to batch updates
+      if (pendingUpdatesRef.current.length === 0) {
+        window.requestAnimationFrame(() => {
+          const updates = pendingUpdatesRef.current;
+          pendingUpdatesRef.current = [];
+          updates.forEach(update => update());
+        });
+      }
+      pendingUpdatesRef.current.push(...updates);
+    } else {
+      // Server environment: execute immediately
+      updates.forEach(update => update());
+    }
+  }, []);
+
+  const set = useCallback((action: Action) => {
+    const nextState = reducerRef.current(storeRef.current, action);
+    // Only update if the state has changed
+    if (nextState !== storeRef.current) {
+      storeRef.current = nextState;
+      // Notify all subscribers of the state change
+      const callbacks = Array.from(subscribersRef.current);
+      batchUpdates(callbacks);
+    }
+  }, [batchUpdates]);
+
+  const subscribe = useCallback((callback: () => void) => {
+    subscribersRef.current.add(callback);
+    return () => {
+      subscribersRef.current.delete(callback);
+    };
+  }, []);
+
+  // Memoize the store object to prevent unnecessary re-creations
+  return useMemo(() => ({
+    get,
+    set,
+    subscribe
+  }), [get, set, subscribe]);
+}
+
+const StoreContext = createContext<Store<any> | null>(null);
+
+function exampleReducer<Store>(state: Store, action: Action): Store {
+  const { type, payload } = action;
+
+  switch (type) {
+    case 'SET':
+      return {
+        ...state,
+        ...payload,
+      };
+    default:
+      return state;
+  }
+}
 
 export function Provider({ children }: { children: ReactNode }) {
-  const store = useStoreData();
+  const store = useConfiguredStore(INITIAL_STATE, exampleReducer);
 
   return (
     <StoreContext.Provider value={store}>
@@ -47,14 +107,14 @@ export function Provider({ children }: { children: ReactNode }) {
   );
 }
 
-export function useStore<SelectorOutput>(selector: (store: Store) => SelectorOutput): [SelectorOutput, (value: Partial<Store>) => void] {
+export function useStore(): [InitialState, (action: Action) => void] {
   const store = useContext(StoreContext);
 
   if (!store) {
-    throw new Error('Store not found');
+    throw new Error("Store must be used within a Provider");
   }
 
-  const state = useSyncExternalStore(store.subscribe, () => selector(store.get()));
+  const state = useSyncExternalStore(store.subscribe, store.get, store.get);
 
   return [state, store.set];
 }
